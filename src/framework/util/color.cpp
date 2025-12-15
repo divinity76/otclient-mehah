@@ -22,6 +22,8 @@
 
 #include "color.h"
 
+#include <cctype>
+
 #include "framework/stdext/string.h"
 
  // NOTE: AABBGGRR order
@@ -131,14 +133,17 @@ namespace {
         {"yellow",rgb_to_abgr(0xFFFF00)}, {"yellowgreen",rgb_to_abgr(0x9ACD32)},
     };
 
-    inline std::string to_lower(std::string_view s) {
-        std::string out; out.reserve(s.size());
-        for (unsigned char c : s) out.push_back(std::tolower(c));
+    inline std::string to_lower_ascii(std::string_view s) {
+        std::string out(s);
+        for (char &c : out)
+            if (c >= 'A' && c <= 'Z')
+                c |= 0x20;
         return out;
     }
+    
 
     inline bool css_lookup(std::string_view name, uint32_t& abgrOut) {
-        const auto key = to_lower(name);
+        const auto key = to_lower_ascii(name);
 
         if (key == "transparent") { abgrOut = 0x00000000u; return true; }
 
@@ -218,136 +223,61 @@ namespace {
         g = clamp255(static_cast<int>(std::lround(gF * 255.0)));
         b = clamp255(static_cast<int>(std::lround(bF * 255.0)));
     }
-}
 
-Color::Color(const std::string_view coltext)
-{
-    std::stringstream ss(coltext.data());
-    ss >> *this;
-    update();
-}
-
-void Color::update() { m_hash = rgba(); }
-
-std::ostream& operator<<(std::ostream& out, const Color& color)
-{
-    return out << '#'
-        << std::hex << std::setfill('0')
-        << std::setw(2) << static_cast<int>(color.r())
-        << std::setw(2) << static_cast<int>(color.g())
-        << std::setw(2) << static_cast<int>(color.b())
-        << std::setw(2) << static_cast<int>(color.a())
-        << std::dec << std::setfill(' ');
-}
-
-std::istream& operator>>(std::istream& in, Color& color)
-{
-    auto clamp255 = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
-
-    auto strip_spaces = [](std::string& s) {
-        s.erase(std::remove_if(s.begin(), s.end(),
-                [](unsigned char c) { return std::isspace(c); }), s.end());
-    };
-
-    auto split_commas = [](std::string s) {
-        std::vector<std::string> parts; parts.reserve(4);
-        size_t pos = 0;
-        while (true) {
-            size_t p = s.find(',', pos);
-            if (p == std::string::npos) { parts.emplace_back(s.substr(pos)); break; }
-            parts.emplace_back(s.substr(pos, p - pos));
-            pos = p + 1;
-        }
-        return parts;
-    };
-
-    auto parse_byte_or_percent = [&](const std::string& s) {
-        if (!s.empty() && s.back() == '%') {
-            const double p = std::strtod(s.c_str(), nullptr);
-            return clamp255(static_cast<int>(std::lround(p * 255.0 / 100.0)));
-        }
-        return clamp255(std::stoi(s));
-    };
-
-    auto parse_alpha_any = [&](const std::string& s) {
-        if (!s.empty() && s.back() == '%') {
-            const double p = std::strtod(s.c_str(), nullptr);
-            return clamp255(static_cast<int>(std::lround(p * 255.0 / 100.0)));
-        }
-        if (s.find_first_of(".eE") != std::string::npos) {
-            double f = std::strtod(s.c_str(), nullptr);
-            if (f < 0) f = 0; if (f > 1) f = 1;
-            return clamp255(static_cast<int>(std::lround(f * 255.0)));
-        }
-        return clamp255(std::stoi(s));
-    };
-
-    auto hsl_to_rgb = [&](double h, double s, double l, int& r, int& g, int& b) {
-        h = std::fmod(h, 360.0); if (h < 0) h += 360.0;
-        s = std::clamp(s, 0.0, 1.0);
-        l = std::clamp(l, 0.0, 1.0);
-        auto hue2rgb = [](double p, double q, double t) {
-            if (t < 0) t += 1; if (t > 1) t -= 1;
-            if (t < 1.0 / 6) return p + (q - p) * 6 * t;
-            if (t < 1.0 / 2) return q;
-            if (t < 2.0 / 3) return p + (q - p) * (2.0 / 3 - t) * 6;
-            return p;
-        };
-        double rF, gF, bF;
-        if (s == 0) { rF = gF = bF = l; } else {
-            const double q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-            const double p = 2 * l - q;
-            const double hk = h / 360.0;
-            rF = hue2rgb(p, q, hk + 1.0 / 3);
-            gF = hue2rgb(p, q, hk);
-            bF = hue2rgb(p, q, hk - 1.0 / 3);
-        }
-        r = clamp255(static_cast<int>(std::lround(rF * 255.0)));
-        g = clamp255(static_cast<int>(std::lround(gF * 255.0)));
-        b = clamp255(static_cast<int>(std::lround(bF * 255.0)));
-    };
-
-    std::string tmp;
-
-    if (in.peek() == '#') {
-        in.ignore() >> tmp;
-        if (tmp.length() == 6 || tmp.length() == 8) {
-            color.setRed(static_cast<uint8_t>(stdext::hex_to_dec(tmp.substr(0, 2))));
-            color.setGreen(static_cast<uint8_t>(stdext::hex_to_dec(tmp.substr(2, 2))));
-            color.setBlue(static_cast<uint8_t>(stdext::hex_to_dec(tmp.substr(4, 2))));
-            if (tmp.length() == 8)
-                color.setAlpha(static_cast<uint8_t>(stdext::hex_to_dec(tmp.substr(6, 2))));
-            else
-                color.setAlpha(255);
-        } else {
-            in.seekg(0 - static_cast<std::streamoff>(tmp.length()) - 1, std::ios_base::cur);
-        }
-        return in;
+    inline std::string_view trim_view(std::string_view sv) {
+        while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front())))
+            sv.remove_prefix(1);
+        while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back())))
+            sv.remove_suffix(1);
+        return sv;
     }
 
-    in >> tmp;
-    if (tmp.empty())
-        return in;
-
-    auto starts = [&](const char* k) { return tmp.rfind(k, 0) == 0; };
-    auto is_func_like =
-        starts("rgb(") || starts("rgba(") ||
-        starts("hsl(") || starts("hsla(");
-
-    if (is_func_like && tmp.find(')') == std::string::npos) {
-        std::string tail;
-        std::getline(in, tail, ')');
-        tmp += tail;
-        tmp.push_back(')');
+    inline bool parse_hex_literal(std::string_view text, Color& color) {
+        if (text.size() != 7 && text.size() != 9)
+            return false;
+        if (text.front() != '#')
+            return false;
+        const auto hex = text.substr(1);
+        if (hex.size() != 6 && hex.size() != 8)
+            return false;
+        const auto r = static_cast<uint8_t>(stdext::hex_to_dec(hex.substr(0, 2)));
+        const auto g = static_cast<uint8_t>(stdext::hex_to_dec(hex.substr(2, 2)));
+        const auto b = static_cast<uint8_t>(stdext::hex_to_dec(hex.substr(4, 2)));
+        const auto a = hex.size() == 8 ? static_cast<uint8_t>(stdext::hex_to_dec(hex.substr(6, 2))) : 0xFF;
+        color.setRGBA(r, g, b, a);
+        return true;
     }
 
-    if (tmp == "alpha") { color = Color::alpha; return in; } else if (tmp == "black") { color = Color::black; return in; } else if (tmp == "white") { color = Color::white; return in; } else if (tmp == "red") { color = Color::red; return in; } else if (tmp == "darkRed") { color = Color::darkRed; return in; } else if (tmp == "green") { color = Color::green; return in; } else if (tmp == "darkGreen") { color = Color::darkGreen; return in; } else if (tmp == "blue") { color = Color::blue; return in; } else if (tmp == "darkBlue") { color = Color::darkBlue; return in; } else if (tmp == "pink") { color = Color::pink; return in; } else if (tmp == "darkPink") { color = Color::darkPink; return in; } else if (tmp == "yellow") { color = Color::yellow; return in; } else if (tmp == "darkYellow") { color = Color::darkYellow; return in; } else if (tmp == "teal") { color = Color::teal; return in; } else if (tmp == "darkTeal") { color = Color::darkTeal; return in; } else if (tmp == "gray") { color = Color::gray; return in; } else if (tmp == "darkGray") { color = Color::darkGray; return in; } else if (tmp == "lightGray") { color = Color::lightGray; return in; } else if (tmp == "orange") { color = Color::orange; return in; }
+    inline bool parse_named_literal(std::string_view text, Color& color) {
+        if (text == "alpha") { color = Color::alpha; return true; }
+        if (text == "black") { color = Color::black; return true; }
+        if (text == "white") { color = Color::white; return true; }
+        if (text == "red") { color = Color::red; return true; }
+        if (text == "darkRed") { color = Color::darkRed; return true; }
+        if (text == "green") { color = Color::green; return true; }
+        if (text == "darkGreen") { color = Color::darkGreen; return true; }
+        if (text == "blue") { color = Color::blue; return true; }
+        if (text == "darkBlue") { color = Color::darkBlue; return true; }
+        if (text == "pink") { color = Color::pink; return true; }
+        if (text == "darkPink") { color = Color::darkPink; return true; }
+        if (text == "yellow") { color = Color::yellow; return true; }
+        if (text == "darkYellow") { color = Color::darkYellow; return true; }
+        if (text == "teal") { color = Color::teal; return true; }
+        if (text == "darkTeal") { color = Color::darkTeal; return true; }
+        if (text == "gray") { color = Color::gray; return true; }
+        if (text == "darkGray") { color = Color::darkGray; return true; }
+        if (text == "lightGray") { color = Color::lightGray; return true; }
+        if (text == "orange") { color = Color::orange; return true; }
+        return false;
+    }
 
-    {
-        std::string t = tmp;
+    inline bool parse_function_literal(std::string_view text, Color& color) {
+        if (text.empty())
+            return false;
+
+        std::string t(text);
         strip_spaces(t);
         auto sw = [&](const char* k) { return t.rfind(k, 0) == 0; };
-        bool parsed = false;
 
         if (sw("rgb(") || sw("rgba(")) {
             const bool hasA = sw("rgba(");
@@ -359,11 +289,8 @@ std::istream& operator>>(std::istream& in, Color& color)
                     const int g = parse_byte_or_percent(parts[1]);
                     const int b = parse_byte_or_percent(parts[2]);
                     const int a = hasA ? parse_alpha_any(parts[3]) : 255;
-                    color.setRed(static_cast<uint8_t>(r));
-                    color.setGreen(static_cast<uint8_t>(g));
-                    color.setBlue(static_cast<uint8_t>(b));
-                    color.setAlpha(static_cast<uint8_t>(a));
-                    parsed = true;
+                    color.setRGBA(static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b), static_cast<uint8_t>(a));
+                    return true;
                 }
             }
         } else if (sw("hsl(") || sw("hsla(")) {
@@ -382,27 +309,113 @@ std::istream& operator>>(std::istream& in, Color& color)
                     const double l = pct(parts[2]);
                     int r, g, b; hsl_to_rgb(h, s, l, r, g, b);
                     const int a = hasA ? parse_alpha_any(parts[3]) : 255;
-                    color.setRed(static_cast<uint8_t>(r));
-                    color.setGreen(static_cast<uint8_t>(g));
-                    color.setBlue(static_cast<uint8_t>(b));
-                    color.setAlpha(static_cast<uint8_t>(a));
-                    parsed = true;
+                    color.setRGBA(static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b), static_cast<uint8_t>(a));
+                    return true;
                 }
             }
         }
 
-        if (parsed) {
-            in >> std::ws;
-            return in;
-        }
+        return false;
+    }
+
+    inline bool try_parse_color_literal(std::string_view text, Color& color) {
+        const auto trimmed = trim_view(text);
+        if (trimmed.empty())
+            return false;
+
+        if (trimmed.front() == '#')
+            return parse_hex_literal(trimmed, color);
+
+        if (parse_named_literal(trimmed, color))
+            return true;
+
+        if (parse_function_literal(trimmed, color))
+            return true;
 
         uint32_t abgr;
-        if (css_lookup(tmp, abgr)) {
+        if (css_lookup(trimmed, abgr)) {
             color = Color(abgr);
+            return true;
+        }
+
+        return false;
+    }
+}
+
+Color::Color(const std::string_view coltext)
+{
+    auto trimmed = trim_view(coltext);
+    if (!trimmed.empty()) {
+        auto starts_with = [&](const char* k) { return trimmed.rfind(k, 0) == 0; };
+        std::string_view token = trimmed;
+
+        if (starts_with("rgb(") || starts_with("rgba(") ||
+            starts_with("hsl(") || starts_with("hsla(")) {
+            const auto close = trimmed.find(')');
+            if (close != std::string_view::npos)
+                token = trimmed.substr(0, close + 1);
         } else {
+            const auto ws = trimmed.find_first_of(" \t\n\r\f\v");
+            if (ws != std::string_view::npos)
+                token = trimmed.substr(0, ws);
+        }
+
+        // Backwards compatibility: ignore trailing text (e.g. inline comments) just like the old stringstream version.
+        try_parse_color_literal(token, *this);
+    }
+    update();
+}
+
+void Color::update() { m_hash = rgba(); }
+
+std::ostream& operator<<(std::ostream& out, const Color& color)
+{
+    return out << '#'
+        << std::hex << std::setfill('0')
+        << std::setw(2) << static_cast<int>(color.r())
+        << std::setw(2) << static_cast<int>(color.g())
+        << std::setw(2) << static_cast<int>(color.b())
+        << std::setw(2) << static_cast<int>(color.a())
+        << std::dec << std::setfill(' ');
+}
+
+std::istream& operator>>(std::istream& in, Color& color)
+{
+    std::string tmp;
+
+    if (in.peek() == '#') {
+        in.ignore();
+        if (!(in >> tmp))
+            return in;
+
+        tmp.insert(tmp.begin(), '#');
+        if (!try_parse_color_literal(tmp, color)) {
             in.seekg(0 - static_cast<std::streamoff>(tmp.length()), std::ios_base::cur);
         }
+        return in;
     }
+
+    if (!(in >> tmp))
+        return in;
+
+    auto starts = [&](const char* k) { return tmp.rfind(k, 0) == 0; };
+    auto is_func_like =
+        starts("rgb(") || starts("rgba(") ||
+        starts("hsl(") || starts("hsla(");
+
+    if (is_func_like && tmp.find(')') == std::string::npos) {
+        std::string tail;
+        std::getline(in, tail, ')');
+        tmp += tail;
+        tmp.push_back(')');
+    }
+
+    if (try_parse_color_literal(tmp, color)) {
+        in >> std::ws;
+        return in;
+    }
+
+    in.seekg(0 - static_cast<std::streamoff>(tmp.length()), std::ios_base::cur);
 
     return in;
 }
