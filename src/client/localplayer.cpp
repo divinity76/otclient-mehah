@@ -22,13 +22,153 @@
 
 #include "localplayer.h"
 
+#include <string>
+#include <sstream>
+#include <vector>
+
 #include "container.h"
 #include "game.h"
 #include "item.h"
 #include "map.h"
+#include "minimap.h"
 #include "tile.h"
+#include "creature.h"
+#include "thingtype.h"
+#include "thingtypemanager.h"
+#include "gameconfig.h"
 #include "framework/core/clock.h"
 #include "framework/core/eventdispatcher.h"
+
+namespace {
+const char* boolToString(const bool value) { return value ? "true" : "false"; }
+
+std::string formatItemLabel(const ItemPtr& item)
+{
+    if (!item)
+        return {};
+
+    std::ostringstream label;
+    label << item->getId();
+    if (const auto& thingType = g_things.getThingType(item->getId(), ThingCategoryItem); thingType) {
+        const auto& name = thingType->getName();
+        if (!name.empty())
+            label << '(' << name << ')';
+    }
+    return label.str();
+}
+
+std::string joinLabels(std::vector<std::string>& labels)
+{
+    if (labels.empty())
+        return "none";
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < labels.size(); ++i) {
+        if (i > 0)
+            ss << ',';
+        ss << labels[i];
+    }
+    return ss.str();
+}
+
+int extractElevation(const TilePtr& tile)
+{
+    if (!tile)
+        return 0;
+
+    for (int level = 10; level >= 1; --level) {
+        if (tile->hasElevation(level))
+            return level;
+    }
+    return 0;
+}
+
+std::string buildTileDebugInfo(const Position& pos)
+{
+    if (!pos.isValid())
+        return "pos=invalid";
+
+    std::ostringstream ss;
+    ss << "pos=" << pos.x << ',' << pos.y << ',' << static_cast<int>(pos.z);
+
+    const bool aware = g_map.isAwareOfPosition(pos);
+    ss << " aware=" << boolToString(aware);
+
+    const auto& tile = g_map.getTile(pos);
+    if (!tile) {
+        ss << " exists=false";
+        ss << " floorChange=unknown";
+        ss << " floorChangeItems=unknown";
+        ss << " blockingItems=unknown";
+        ss << " nonPathableItems=unknown";
+        ss << " creatures=unknown";
+        ss << " items=unknown";
+        const auto [block, minimapTile] = g_minimap.threadGetTile(pos);
+        ss << " minimapSeen=" << boolToString(minimapTile.hasFlag(MinimapTileWasSeen));
+        ss << " minimapNotWalkable=" << boolToString(minimapTile.hasFlag(MinimapTileNotWalkable));
+        ss << " minimapNotPathable=" << boolToString(minimapTile.hasFlag(MinimapTileNotPathable));
+        ss << " minimapEmpty=" << boolToString(minimapTile.hasFlag(MinimapTileEmpty));
+        ss << " minimapSpeed=" << minimapTile.getSpeed();
+        return ss.str();
+    }
+
+    ss << " exists=true";
+    ss << " walkable=" << boolToString(tile->isWalkable());
+    ss << " walkableIgnoreCreatures=" << boolToString(tile->isWalkable(true));
+    ss << " pathable=" << boolToString(tile->isPathable());
+    ss << " fullGround=" << boolToString(tile->isFullGround());
+    ss << " elevation=" << extractElevation(tile);
+
+    std::vector<std::string> blockingItems;
+    std::vector<std::string> nonPathableItems;
+    std::vector<std::string> floorChangeItems;
+    std::vector<std::string> tileItems;
+
+    const auto inspectItem = [&](const ItemPtr& item) {
+        if (!item)
+            return;
+        const auto& thingType = g_things.getThingType(item->getId(), ThingCategoryItem);
+        if (!thingType)
+            return;
+
+        auto label = formatItemLabel(item);
+        if (label.empty())
+            label = std::to_string(item->getId());
+
+        tileItems.emplace_back(label);
+
+        if (thingType->hasAttr(ThingAttrFloorChange))
+            floorChangeItems.emplace_back(label);
+        if (thingType->isNotWalkable() || thingType->isFullGround())
+            blockingItems.emplace_back(label);
+        if (thingType->isNotPathable())
+            nonPathableItems.emplace_back(label);
+    };
+
+    inspectItem(tile->getGround());
+    for (const auto& item : tile->getItems())
+        inspectItem(item);
+
+    std::vector<std::string> creatureNames;
+    if (tile->hasCreatures()) {
+        for (const auto& creature : tile->getCreatures()) {
+            if (!creature)
+                continue;
+            const auto& name = creature->getName();
+            creatureNames.emplace_back(name.empty() ? "unknown" : name);
+        }
+    }
+
+    ss << " floorChange=" << boolToString(!floorChangeItems.empty());
+    ss << " floorChangeItems=" << joinLabels(floorChangeItems);
+    ss << " blockingItems=" << joinLabels(blockingItems);
+    ss << " nonPathableItems=" << joinLabels(nonPathableItems);
+    ss << " creatures=" << joinLabels(creatureNames);
+    ss << " items=" << joinLabels(tileItems);
+
+    return ss.str();
+}
+} // namespace
 
 void LocalPlayer::lockWalk(const uint16_t millis)
 {
@@ -183,6 +323,45 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
     m_autoWalkDestination = destination;
 
     g_map.findPathAsync(m_position, destination, [self = asLocalPlayer()](const auto& result) {
+        const auto reportAutoWalkFailure = [self](const PathFindResult_ptr& res, const std::string& failureReason) {
+            const auto pendingDestination = self->m_autoWalkDestination;
+            const auto playerPos = self->getPosition();
+            const auto retries = self->m_autoWalkRetries;
+            const auto destinationDebug = buildTileDebugInfo(res->destination);
+            const auto playerTileDebug = buildTileDebugInfo(playerPos);
+            const auto pendingTileDebug = buildTileDebugInfo(pendingDestination);
+            Position belowPos = res->destination;
+            std::string belowTileDebug;
+            if (belowPos.isValid() && belowPos.z < g_gameConfig.getMapMaxZ()) {
+                belowPos.z += 1;
+                belowTileDebug = buildTileDebugInfo(belowPos);
+            }
+
+            Position abovePos = res->destination;
+            std::string aboveTileDebug;
+            if (abovePos.isValid() && abovePos.z > 0) {
+                abovePos.z -= 1;
+                aboveTileDebug = buildTileDebugInfo(abovePos);
+            }
+
+            self->m_autoWalkDestination = {};
+            self->callLuaField("onAutoWalkFail",
+                               res->status,
+                               res->start,
+                               res->destination,
+                               static_cast<uint16_t>(res->path.size()),
+                               res->complexity,
+                               playerPos,
+                               pendingDestination,
+                               retries,
+                               failureReason,
+                               destinationDebug,
+                               playerTileDebug,
+                               pendingTileDebug,
+                               belowTileDebug,
+                               aboveTileDebug);
+        };
+
         if (self->m_autoWalkDestination != result->destination)
             return;
 
@@ -191,8 +370,7 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
                 self->m_autoWalkContinueEvent = g_dispatcher.scheduleEvent([self, capture0 = result->destination] { self->autoWalk(capture0, true); }, 200 + self->m_autoWalkRetries * 100);
                 return;
             }
-            self->m_autoWalkDestination = {};
-            self->callLuaField("onAutoWalkFail", result->status);
+            reportAutoWalkFailure(result, "status_error");
             return;
         }
 
@@ -200,8 +378,7 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
             result->path.resize(127);
 
         if (result->path.empty()) {
-            self->m_autoWalkDestination = {};
-            self->callLuaField("onAutoWalkFail", result->status);
+            reportAutoWalkFailure(result, "empty_path");
             return;
         }
 

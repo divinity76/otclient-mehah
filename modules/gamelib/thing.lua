@@ -40,6 +40,7 @@ ThingAttrFullGround = 30
 ThingAttrLook = 31
 ThingAttrCloth = 32
 ThingAttrMarket = 33
+ThingAttrFloorChange = 252
 ThingAttrNoMoveAnimation = 253 -- >= 1010, value = 16
 ThingAttrChargeable = 254 -- deprecated
 ThingLastAttr = 255

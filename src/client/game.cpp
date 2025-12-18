@@ -22,6 +22,11 @@
 
 #include "game.h"
 
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <fstream>
+
 #include "attachedeffect.h"
 #include "container.h"
 #include "gameconfig.h"
@@ -38,9 +43,51 @@
 #include "framework/luaengine/luainterface.h"
 #include "framework/net/packet_player.h"
 #include "framework/net/packet_recorder.h"
+#include "framework/core/resourcemanager.h"
 #include "luavaluecasts_client.h"
 
 Game g_game;
+
+namespace {
+bool isTrackedTextMessage(const std::string_view text)
+{
+    static const std::array trackedMessages{
+        std::string_view("Sorry, not possible."),
+        std::string_view("Sorry, not possible"),
+        std::string_view("There is no way."),
+        std::string_view("There is no way")
+    };
+
+    return std::find(trackedMessages.begin(), trackedMessages.end(), text) != trackedMessages.end();
+}
+
+const std::filesystem::path& getTrackedLogPath()
+{
+    static const std::filesystem::path logPath = [] {
+        std::filesystem::path exePath(g_resources.getBinaryPath());
+        if (exePath.empty())
+            return std::filesystem::current_path() / "sorry.log";
+
+        const auto dir = exePath.has_parent_path() ? exePath.parent_path() : std::filesystem::current_path();
+        return dir / "sorry.log";
+    }();
+    return logPath;
+}
+
+void appendSorryLog(const std::string_view source, const std::string_view text, std::string context = {})
+{
+    const auto& logPath = getTrackedLogPath();
+    std::ofstream log(logPath, std::ios::app);
+    if (!log)
+        return;
+
+    log << '[' << source << ']';
+    if (!context.empty())
+        log << ' ' << context;
+
+    log << " | " << text << '\n';
+}
+} // namespace
 
 void Game::init()
 {
@@ -269,6 +316,11 @@ void Game::processPingBack()
 
 void Game::processTextMessage(const Otc::MessageMode mode, const std::string_view text)
 {
+    if (isTrackedTextMessage(text)) {
+        auto context = std::string("mode=") + std::to_string(static_cast<int>(mode));
+        appendSorryLog("C++ Game::processTextMessage", text, context);
+    }
+
     g_lua.callGlobalField("g_game", "onTextMessage", mode, text);
 }
 
