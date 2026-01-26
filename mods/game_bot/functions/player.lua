@@ -128,14 +128,21 @@ context.use = function(thing, subtype)
   end
 end
 context.usewith = function(thing, target, subtype)
-  if not thing then
-    return
-  end
-  if type(thing) == 'number' then
-    return g_game.useInventoryItemWith(thing, target, subtype)
-  else
-    return g_game.useWith(thing, target, subtype)
-  end
+    if type(thing) == 'number' then
+        if g_game.getProtocolVersion() <= 760 then
+            -- 760 requires targetTop, and g_game.useInventoryItemWith does not deduce it internally
+            local subtype760 = (subtype == nil) and -1 or subtype
+            local item = g_game.findPlayerItem(thing, subtype760)
+            local targetTile = target:getTile()
+            local targetTop = targetTile and targetTile:getTopUseThing()
+            if item and targetTop then
+                return g_game.useWith(item, targetTop, subtype760)
+            end
+        end
+        return g_game.useInventoryItemWith(thing, target, subtype)
+    else
+        return g_game.useWith(thing, target, subtype)
+    end
 end
 context.useWith = context.usewith
 
